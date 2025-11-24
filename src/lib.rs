@@ -15,8 +15,6 @@ use bitflags::bitflags;
 use linux_raw_sys::general::*;
 use spin::Mutex;
 
-mod tests;
-
 bitflags! {
     /// I/O events.
     #[derive(Debug, Clone, Copy)]

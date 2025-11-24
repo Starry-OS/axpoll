@@ -4,37 +4,28 @@ extern crate std;
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::*;
+    use axpoll::PollSet;
     use std::sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
     };
-    use std::task::{Context, RawWaker, RawWakerVTable, Waker};
+    use std::task::{Context, Wake, Waker};
+
+    struct WrapArc(Arc<AtomicUsize>);
+
+    impl Wake for WrapArc {
+        fn wake(self: Arc<Self>) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
 
     fn make_waker(counter: Arc<AtomicUsize>) -> Waker {
-        unsafe fn clone(ptr: *const ()) -> RawWaker {
-            let arc = unsafe { Arc::<AtomicUsize>::from_raw(ptr as *const AtomicUsize) };
-            let arc2 = arc.clone();
-            std::mem::forget(arc);
-            RawWaker::new(Arc::into_raw(arc2) as *const (), &VTABLE)
-        }
-        unsafe fn wake(ptr: *const ()) {
-            let arc = unsafe { Arc::<AtomicUsize>::from_raw(ptr as *const AtomicUsize) };
-            arc.fetch_add(1, Ordering::SeqCst);
-        }
-        unsafe fn wake_by_ref(ptr: *const ()) {
-            let arc = unsafe { Arc::<AtomicUsize>::from_raw(ptr as *const AtomicUsize) };
-            arc.fetch_add(1, Ordering::SeqCst);
-            std::mem::forget(arc);
-        }
-        unsafe fn drop_arc(ptr: *const ()) {
-            let _ = unsafe { Arc::<AtomicUsize>::from_raw(ptr as *const AtomicUsize) };
-        }
-
-        static VTABLE: RawWakerVTable = RawWakerVTable::new(clone, wake, wake_by_ref, drop_arc);
-
-        let raw = RawWaker::new(Arc::into_raw(counter.clone()) as *const (), &VTABLE);
-        unsafe { Waker::from_raw(raw) }
+        let wrapped = Arc::new(WrapArc(counter.clone()));
+        Waker::from(wrapped)
     }
 
     #[test]
