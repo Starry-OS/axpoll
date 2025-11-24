@@ -51,6 +51,8 @@ jobs:
       contents: read
       pages: write
       id-token: write
+    environment:
+      name: github-pages
     steps:
       - name: Deploy to GitHub Pages
         id: deployment
