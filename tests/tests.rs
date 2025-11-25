@@ -1,89 +1,97 @@
-#[cfg(test)]
-extern crate std;
-
-#[cfg(test)]
-mod test {
-    use super::*;
-    use axpoll::PollSet;
-    use std::sync::{
+use std::{
+    sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
-    };
-    use std::task::{Context, Wake, Waker};
+    },
+    task::{Context, Wake, Waker},
+};
 
-    struct WrapArc(Arc<AtomicUsize>);
+use axpoll::PollSet;
 
-    impl Wake for WrapArc {
-        fn wake(self: Arc<Self>) {
-            self.0.fetch_add(1, Ordering::SeqCst);
-        }
+struct Counter(Arc<AtomicUsize>);
 
-        fn wake_by_ref(self: &Arc<Self>) {
-            self.0.fetch_add(1, Ordering::SeqCst);
-        }
+impl Counter {
+    fn new() -> Self {
+        Self(Arc::new(AtomicUsize::new(0)))
     }
 
-    fn make_waker(counter: Arc<AtomicUsize>) -> Waker {
-        let wrapped = Arc::new(WrapArc(counter.clone()));
-        Waker::from(wrapped)
+    fn count(&self) -> usize {
+        self.0.load(Ordering::SeqCst)
     }
 
-    #[test]
-    fn register_and_wake() {
-        let ps = PollSet::new();
-        let counter = Arc::new(AtomicUsize::new(0));
-        let w = make_waker(counter.clone());
-        ps.register(&w);
-        assert_eq!(ps.wake(), 1);
-        assert_eq!(counter.load(Ordering::SeqCst), 1);
+    fn add(&self) {
+        self.0.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+impl Wake for Counter {
+    fn wake(self: Arc<Self>) {
+        self.add();
     }
 
-    #[test]
-    fn empty_return() {
-        let ps = PollSet::new();
-        assert_eq!(ps.wake(), 0);
+    fn wake_by_ref(self: &Arc<Self>) {
+        self.add();
     }
+}
 
-    #[test]
-    fn full_capacity() {
-        let ps = PollSet::new();
-        let counter = Arc::new(AtomicUsize::new(0));
-        for _ in 0..64 {
-            let w = make_waker(counter.clone());
-            let cx = Context::from_waker(&w);
-            ps.register(cx.waker());
-        }
-        let woke = ps.wake();
-        assert_eq!(woke, 64);
-        assert_eq!(counter.load(Ordering::SeqCst), 64);
-    }
+fn make_waker(counter: Arc<AtomicUsize>) -> Waker {
+    let wrapped = Arc::new(Counter(counter.clone()));
+    Waker::from(wrapped)
+}
 
-    #[test]
-    fn overwrite() {
-        let ps = PollSet::new();
-        let counters = (0..65)
-            .map(|_| Arc::new(AtomicUsize::new(0)))
-            .collect::<std::vec::Vec<Arc<AtomicUsize>>>();
-        for c in &counters {
-            let w = make_waker(c.clone());
-            let cx = Context::from_waker(&w);
-            ps.register(cx.waker());
-        }
-        assert_eq!(ps.wake(), 64);
-        let total: usize = counters.iter().map(|c| c.load(Ordering::SeqCst)).sum();
-        assert_eq!(total, 65);
-    }
+#[test]
+fn register_and_wake() {
+    let ps = PollSet::new();
+    let counter = Counter::new();
+    let w = make_waker(counter.0.clone());
+    ps.register(&w);
+    assert_eq!(ps.wake(), 1);
+    assert_eq!(counter.count(), 1);
+}
 
-    #[test]
-    fn drop_wakes() {
-        let ps = PollSet::new();
-        let counters = Arc::new(AtomicUsize::new(0));
-        for _ in 0..10 {
-            let w = make_waker(counters.clone());
-            let cx = Context::from_waker(&w);
-            ps.register(cx.waker());
-        }
-        drop(ps);
-        assert_eq!(counters.load(Ordering::SeqCst), 10);
+#[test]
+fn empty_return() {
+    let ps = PollSet::new();
+    assert_eq!(ps.wake(), 0);
+}
+
+#[test]
+fn full_capacity() {
+    let ps = PollSet::new();
+    let counter = Counter::new();
+    for _ in 0..64 {
+        let w = make_waker(counter.0.clone());
+        let cx = Context::from_waker(&w);
+        ps.register(cx.waker());
     }
+    let woke = ps.wake();
+    assert_eq!(woke, 64);
+    assert_eq!(counter.count(), 64);
+}
+
+#[test]
+fn overwrite() {
+    let ps = PollSet::new();
+    let counters = (0..65).map(|_| Counter::new()).collect::<Vec<_>>();
+    for c in &counters {
+        let w = make_waker(c.0.clone());
+        let cx = Context::from_waker(&w);
+        ps.register(cx.waker());
+    }
+    assert_eq!(ps.wake(), 64);
+    let total: usize = counters.iter().map(|c| c.count()).sum();
+    assert_eq!(total, 65);
+}
+
+#[test]
+fn drop_wakes() {
+    let ps = PollSet::new();
+    let counters = Counter::new();
+    for _ in 0..10 {
+        let w = make_waker(counters.0.clone());
+        let cx = Context::from_waker(&w);
+        ps.register(cx.waker());
+    }
+    drop(ps);
+    assert_eq!(counters.count(), 10);
 }
