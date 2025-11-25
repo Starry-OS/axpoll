@@ -8,11 +8,11 @@ use std::{
 
 use axpoll::PollSet;
 
-struct Counter(Arc<AtomicUsize>);
+struct Counter(AtomicUsize);
 
 impl Counter {
-    fn new() -> Self {
-        Self(Arc::new(AtomicUsize::new(0)))
+    fn new() -> Arc<Self> {
+        Arc::new(Self(AtomicUsize::new(0)))
     }
 
     fn count(&self) -> usize {
@@ -34,16 +34,11 @@ impl Wake for Counter {
     }
 }
 
-fn make_waker(counter: Arc<AtomicUsize>) -> Waker {
-    let wrapped = Arc::new(Counter(counter.clone()));
-    Waker::from(wrapped)
-}
-
 #[test]
 fn register_and_wake() {
     let ps = PollSet::new();
     let counter = Counter::new();
-    let w = make_waker(counter.0.clone());
+    let w = Waker::from(counter.clone());
     ps.register(&w);
     assert_eq!(ps.wake(), 1);
     assert_eq!(counter.count(), 1);
@@ -60,7 +55,7 @@ fn full_capacity() {
     let ps = PollSet::new();
     let counter = Counter::new();
     for _ in 0..64 {
-        let w = make_waker(counter.0.clone());
+        let w = Waker::from(counter.clone());
         let cx = Context::from_waker(&w);
         ps.register(cx.waker());
     }
@@ -74,7 +69,7 @@ fn overwrite() {
     let ps = PollSet::new();
     let counters = (0..65).map(|_| Counter::new()).collect::<Vec<_>>();
     for c in &counters {
-        let w = make_waker(c.0.clone());
+        let w = Waker::from(c.clone());
         let cx = Context::from_waker(&w);
         ps.register(cx.waker());
     }
@@ -88,7 +83,7 @@ fn drop_wakes() {
     let ps = PollSet::new();
     let counters = Counter::new();
     for _ in 0..10 {
-        let w = make_waker(counters.0.clone());
+        let w = Waker::from(counters.clone());
         let cx = Context::from_waker(&w);
         ps.register(cx.waker());
     }
