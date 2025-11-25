@@ -94,6 +94,7 @@ fn drop_wakes() {
     drop(ps);
     assert_eq!(counters.count(), 10);
 }
+
 #[test]
 fn concurrent_registers() {
     let ps = Arc::new(PollSet::new());
