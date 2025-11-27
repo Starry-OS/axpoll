@@ -6,11 +6,10 @@ use std::{
         atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     task::{Context, Poll},
-    time::Duration,
 };
 
 use axpoll::PollSet;
-use tokio::time;
+use tokio::{task, sync::Barrier};
 
 struct WaitFuture {
     ps: Arc<PollSet>,
@@ -60,8 +59,8 @@ async fn async_wake_single() {
     let f = WaitFuture::new(ps.clone(), ready.clone());
 
     let handle = tokio::spawn(async move {
-        ready.clone().store(true, Ordering::SeqCst);
-        ps.clone().wake();
+        ready.store(true, Ordering::SeqCst);
+        ps.wake();
     });
 
     f.await;
@@ -75,28 +74,36 @@ async fn async_wake_many() {
 
     let mut flags = Vec::new();
     let mut handles = Vec::new();
-
-    for _ in 0..65 {
+    let barrier = Arc::new(Barrier::new(66));
+    for i in 0..65 {
         let flag = Arc::new(AtomicBool::new(false));
+        if i % 2 == 0 {
+            flag.store(true, Ordering::SeqCst);
+        }
+        let b = barrier.clone();
         let f = WaitFuture::new(ps.clone(), flag.clone());
         let counter = counter.clone();
         let h = tokio::spawn(async move {
+            b.wait().await;
             f.await;
             counter.add();
         });
         flags.push(flag);
         handles.push(h);
     }
+    barrier.wait().await;
+    let pending: Vec<_> = flags.iter().filter(|f| !f.load(Ordering::SeqCst)).collect();
 
-    time::sleep(Duration::from_millis(20)).await;
-
-    for f in &flags {
+    ps.wake();
+    task::yield_now().await;
+    assert_eq!(counter.count(), 33);
+    
+    for f in &pending {
         f.store(true, Ordering::SeqCst);
     }
     ps.wake();
     for h in handles {
         h.await.unwrap();
     }
-
     assert_eq!(counter.count(), 65);
 }
