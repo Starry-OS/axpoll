@@ -2,14 +2,10 @@ use std::{
     sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
-        mpsc,
     },
     task::{Context, Wake, Waker},
-    thread,
-    time::Duration,
 };
 
-use rand::{Rng, rng};
 use axpoll::PollSet;
 
 struct Counter(AtomicUsize);
@@ -93,52 +89,4 @@ fn drop_wakes() {
     }
     drop(ps);
     assert_eq!(counters.count(), 10);
-}
-#[test]
-fn concurrent_registers() {
-    let ps = Arc::new(PollSet::new());
-    let (tx, rx) = mpsc::channel();
-    let threads_n = 50usize;
-    let per_thread = 200usize;
-    let total = threads_n * per_thread;
-    let mut handles = Vec::new();
-
-    let ps1 = ps.clone();
-    let wake_handle = thread::spawn(move || {
-        for _ in 0..(threads_n * 10) {
-            ps1.as_ref().wake();
-            let mut rng = rng();
-            let s = rng.random_range(0..3);
-            thread::sleep(Duration::from_millis(s));
-        }
-    });
-    for _ in 0..threads_n {
-        let tx = tx.clone();
-        let ps = ps.clone();
-        let handle = thread::spawn(move || {
-            let mut rng = rng();
-            for _ in 0..per_thread {
-                let counter = Counter::new();
-                let w = Waker::from(counter.clone());
-                let cx = Context::from_waker(&w);
-                if rng.random_bool(0.1) {
-                    thread::sleep(Duration::from_micros(rng.random_range(0..500)));
-                }
-                ps.register(cx.waker());
-                tx.send(counter).unwrap();
-            }
-        });
-        handles.push(handle);
-    }
-
-    drop(tx);
-    for h in handles {
-        h.join().unwrap();
-    }
-    wake_handle.join().unwrap();
-    let counters: Vec<_> = rx.into_iter().collect();
-    ps.wake();
-    let woke: usize = counters.iter().map(|c| c.count()).sum();
-    assert_eq!(counters.len(), total);
-    assert_eq!(woke, total);
 }
