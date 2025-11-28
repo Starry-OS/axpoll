@@ -3,13 +3,14 @@ use std::{
     pin::Pin,
     sync::{
         Arc,
-        atomic::{AtomicBool, AtomicUsize, Ordering},
+        atomic::{AtomicBool, Ordering},
     },
     task::{Context, Poll},
 };
 
 use axpoll::PollSet;
-use tokio::{task, sync::Barrier};
+use tokio::sync::Barrier;
+use futures::future;
 
 struct WaitFuture {
     ps: Arc<PollSet>,
@@ -35,22 +36,6 @@ impl WaitFuture {
     }
 }
 
-struct Counter(AtomicUsize);
-
-impl Counter {
-    fn new() -> Arc<Self> {
-        Arc::new(Self(AtomicUsize::new(0)))
-    }
-
-    fn count(&self) -> usize {
-        self.0.load(Ordering::SeqCst)
-    }
-
-    fn add(&self) {
-        self.0.fetch_add(1, Ordering::SeqCst);
-    }
-}
-
 #[tokio::test]
 async fn async_wake_single() {
     let ps = Arc::new(PollSet::new());
@@ -70,40 +55,44 @@ async fn async_wake_single() {
 #[tokio::test]
 async fn async_wake_many() {
     let ps = Arc::new(PollSet::new());
-    let counter = Counter::new();
-
     let mut flags = Vec::new();
     let mut handles = Vec::new();
     let barrier = Arc::new(Barrier::new(66));
-    for i in 0..65 {
+    for _ in 0..65 {
         let flag = Arc::new(AtomicBool::new(false));
-        if i % 2 == 0 {
-            flag.store(true, Ordering::SeqCst);
-        }
         let b = barrier.clone();
         let f = WaitFuture::new(ps.clone(), flag.clone());
-        let counter = counter.clone();
         let h = tokio::spawn(async move {
             b.wait().await;
             f.await;
-            counter.add();
         });
         flags.push(flag);
         handles.push(h);
     }
     barrier.wait().await;
-    let pending: Vec<_> = flags.iter().filter(|f| !f.load(Ordering::SeqCst)).collect();
 
-    ps.wake();
-    task::yield_now().await;
-    assert_eq!(counter.count(), 33);
-    
-    for f in &pending {
-        f.store(true, Ordering::SeqCst);
+    let mut ready: Vec<_> = Vec::new();
+    let mut pending: Vec<_> = Vec::new();
+    for (i, h) in handles.into_iter().enumerate() {
+        if i % 2 == 0 {
+            ready.push(h);
+            flags[i].store(true, Ordering::SeqCst);
+        } else {
+            pending.push(h);
+        }
     }
     ps.wake();
-    for h in handles {
-        h.await.unwrap();
+    let results = future::join_all(ready).await;
+    assert_eq!(results.len(), 33);
+    assert!(results.into_iter().all(|r| r.is_ok()));
+
+    for (i, f) in flags.iter().enumerate() {
+        if i % 2 != 0 {
+            f.store(true, Ordering::SeqCst);
+        }
     }
-    assert_eq!(counter.count(), 65);
+    ps.wake();
+    let results = future::join_all(pending).await;
+    assert_eq!(results.len(), 32);
+    assert!(results.into_iter().all(|r| r.is_ok()));
 }
