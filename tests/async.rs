@@ -82,9 +82,7 @@ async fn async_wake_many() {
         }
     }
     ps.wake();
-    let results = future::join_all(ready).await;
-    assert_eq!(results.len(), 33);
-    assert!(results.into_iter().all(|r| r.is_ok()));
+    future::try_join_all(ready).await.unwrap();
 
     for (i, f) in flags.iter().enumerate() {
         if i % 2 != 0 {
@@ -92,7 +90,5 @@ async fn async_wake_many() {
         }
     }
     ps.wake();
-    let results = future::join_all(pending).await;
-    assert_eq!(results.len(), 32);
-    assert!(results.into_iter().all(|r| r.is_ok()));
+    future::try_join_all(pending).await.unwrap();
 }
