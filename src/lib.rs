@@ -93,11 +93,22 @@ impl Inner {
     }
 
     fn register(&mut self, waker: &Waker, events: IoEvents) -> Option<Waker> {
+        // Deduplicate: if the same waker is already registered, merge the
+        // events mask into the existing entry instead of inserting a duplicate.
+        let n = self.len();
+        for slot in self.entries[..n].iter_mut() {
+            let entry = unsafe { slot.assume_init_mut() };
+            if entry.waker.will_wake(waker) {
+                entry.events |= events;
+                return None;
+            }
+        }
+
         let slot = self.cursor % POLL_SET_CAPACITY;
         let evicted = if self.cursor >= POLL_SET_CAPACITY {
             let old = unsafe { self.entries[slot].assume_init_read() };
             self.cursor = ((slot + 1) % POLL_SET_CAPACITY) + POLL_SET_CAPACITY;
-            (!old.waker.will_wake(waker)).then_some(old.waker)
+            Some(old.waker)
         } else {
             self.cursor += 1;
             None

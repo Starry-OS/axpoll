@@ -53,15 +53,16 @@ fn empty_return() {
 #[test]
 fn full_capacity() {
     let ps = PollSet::new();
-    let counter = Counter::new();
-    for _ in 0..64 {
-        let w = Waker::from(counter.clone());
-        let cx = Context::from_waker(&w);
-        ps.register(cx.waker());
+    let counters = (0..64).map(|_| Counter::new()).collect::<Vec<_>>();
+    for c in &counters {
+        let w = Waker::from(c.clone());
+        ps.register(&w);
     }
     let woke = ps.wake();
     assert_eq!(woke, 64);
-    assert_eq!(counter.count(), 64);
+    for c in &counters {
+        assert_eq!(c.count(), 1);
+    }
 }
 
 #[test]
@@ -81,14 +82,29 @@ fn overwrite() {
 #[test]
 fn drop_wakes() {
     let ps = PollSet::new();
-    let counters = Counter::new();
-    for _ in 0..10 {
-        let w = Waker::from(counters.clone());
-        let cx = Context::from_waker(&w);
-        ps.register(cx.waker());
+    let counters = (0..10).map(|_| Counter::new()).collect::<Vec<_>>();
+    for c in &counters {
+        let w = Waker::from(c.clone());
+        ps.register(&w);
     }
     drop(ps);
-    assert_eq!(counters.count(), 10);
+    for c in &counters {
+        assert_eq!(c.count(), 1);
+    }
+}
+
+#[test]
+fn register_merges_events() {
+    let ps = PollSet::new();
+    let counter = Counter::new();
+    let waker = Waker::from(counter.clone());
+
+    ps.register_with_events(&waker, IoEvents::IN);
+    ps.register_with_events(&waker, IoEvents::OUT);
+
+    // Deduplicated into a single entry (IN|OUT), woken exactly once.
+    assert_eq!(ps.wake(), 1);
+    assert_eq!(counter.count(), 1);
 }
 
 #[test]
