@@ -34,30 +34,36 @@ impl Wake for ReentrantWaker {
     }
 }
 
+/// A distinct no-op waker.
+struct Dummy;
+
+// We need *distinct* wakers (not `Waker::noop()`, which is a singleton and
+// would be deduplicated), so a manual no-op impl is intentional here.
+#[allow(clippy::manual_noop_waker)]
+impl Wake for Dummy {
+    fn wake(self: Arc<Self>) {}
+    fn wake_by_ref(self: &Arc<Self>) {}
+}
+
 #[test]
 fn eviction_must_not_wake_under_lock() {
     let ps = Arc::new(PollSet::new());
 
-    // Slot 0 is the reentrant waker; the remaining 63 slots are dummies.
+    // Fill 64 slots: slot 0 is the reentrant waker, the rest are distinct dummies.
     let reentrant = Arc::new(ReentrantWaker { ps: ps.clone() });
     let reentrant_waker = Waker::from(reentrant);
-    let dummy = Waker::noop();
-
-    for i in 0..64 {
-        if i == 0 {
-            ps.register(&reentrant_waker);
-        } else {
-            ps.register(dummy);
-        }
+    ps.register(&reentrant_waker);
+    for _ in 0..63 {
+        ps.register(&Waker::from(Arc::new(Dummy)));
     }
 
-    // The 65th registration evicts slot 0 and wakes it. If `register` wakes the
-    // evicted waker while holding the lock, the reentrant waker deadlocks and
-    // this thread never sends on the channel.
+    // The 65th (distinct) registration evicts slot 0 and wakes it. If
+    // `register` wakes the evicted waker while holding the lock, the reentrant
+    // waker deadlocks and this thread never sends on the channel.
     let (tx, rx) = mpsc::channel();
     let ps = ps.clone();
     let handle = thread::spawn(move || {
-        ps.register(dummy);
+        ps.register(&Waker::from(Arc::new(Dummy)));
         let _ = tx.send(());
     });
 
