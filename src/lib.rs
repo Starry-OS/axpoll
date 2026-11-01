@@ -65,8 +65,14 @@ pub trait Pollable {
 
 const POLL_SET_CAPACITY: usize = 64;
 
+/// A single waiting task: its waker and the events it is interested in.
+struct Entry {
+    waker: Waker,
+    events: IoEvents,
+}
+
 struct Inner {
-    entries: Box<[MaybeUninit<Waker>]>,
+    entries: Box<[MaybeUninit<Entry>]>,
     cursor: usize,
 }
 
@@ -86,37 +92,55 @@ impl Inner {
         self.cursor == 0
     }
 
-    fn register(&mut self, waker: &Waker) -> Option<Waker> {
+    fn register(&mut self, waker: &Waker, events: IoEvents) -> Option<Waker> {
         let slot = self.cursor % POLL_SET_CAPACITY;
         let evicted = if self.cursor >= POLL_SET_CAPACITY {
             let old = unsafe { self.entries[slot].assume_init_read() };
             self.cursor = ((slot + 1) % POLL_SET_CAPACITY) + POLL_SET_CAPACITY;
-            (!old.will_wake(waker)).then_some(old)
+            (!old.waker.will_wake(waker)).then_some(old.waker)
         } else {
             self.cursor += 1;
             None
         };
-        self.entries[slot].write(waker.clone());
+        self.entries[slot].write(Entry {
+            waker: waker.clone(),
+            events,
+        });
         evicted
     }
 
-    /// Moves all initialized wakers out into `buf`, resets the cursor, and
-    /// returns the number moved. The backing buffer is kept and reused, so
-    /// this performs no allocation.
-    fn take_all(&mut self, buf: &mut [MaybeUninit<Waker>; POLL_SET_CAPACITY]) -> usize {
+    /// Moves every entry whose events match `filter` out into `buf`, keeps the
+    /// non-matching entries (compacted in place), and returns the number moved.
+    ///
+    /// This keeps the backing buffer alive, so it performs no allocation.
+    #[allow(clippy::needless_range_loop)]
+    fn take_where(
+        &mut self,
+        buf: &mut [MaybeUninit<Entry>; POLL_SET_CAPACITY],
+        filter: impl Fn(IoEvents) -> bool,
+    ) -> usize {
         let n = self.len();
-        for (dst, src) in buf.iter_mut().zip(&mut self.entries[..n]) {
-            *dst = core::mem::replace(src, MaybeUninit::uninit());
+        let mut out = 0;
+        let mut kept = 0;
+        for i in 0..n {
+            let entry = unsafe { self.entries[i].assume_init_read() };
+            if filter(entry.events) {
+                buf[out].write(entry);
+                out += 1;
+            } else {
+                self.entries[kept].write(entry);
+                kept += 1;
+            }
         }
-        self.cursor = 0;
-        n
+        self.cursor = kept;
+        out
     }
 }
 
 impl Drop for Inner {
     fn drop(&mut self) {
         for i in 0..self.len() {
-            unsafe { self.entries[i].assume_init_read() }.wake();
+            unsafe { self.entries[i].assume_init_read() }.waker.wake();
         }
     }
 }
@@ -136,28 +160,44 @@ impl PollSet {
         Self(Lazy::new(|| Mutex::new(Inner::new())))
     }
 
-    /// Registers a waker.
+    /// Registers a waker interested in all events.
     pub fn register(&self, waker: &Waker) {
-        let evicted = self.0.lock().register(waker);
+        self.register_with_events(waker, IoEvents::all());
+    }
+
+    /// Registers a waker interested only in `events`.
+    pub fn register_with_events(&self, waker: &Waker, events: IoEvents) {
+        let evicted = self.0.lock().register(waker, events);
         if let Some(evicted) = evicted {
             evicted.wake();
         }
     }
 
-    /// Wakes up all registered wakers.
+    /// Wakes up all registered wakers, and returns the number woken.
     pub fn wake(&self) -> usize {
-        let mut buf: [MaybeUninit<Waker>; POLL_SET_CAPACITY] =
+        self.drain(|_| true)
+    }
+
+    /// Wakes up only the wakers whose registered events intersect `events`,
+    /// and returns the number woken.
+    pub fn wake_events(&self, events: IoEvents) -> usize {
+        self.drain(|e| e.intersects(events))
+    }
+
+    /// Drains (and wakes) every entry matching `filter`, outside the lock.
+    fn drain(&self, filter: impl Fn(IoEvents) -> bool) -> usize {
+        let mut buf: [MaybeUninit<Entry>; POLL_SET_CAPACITY] =
             core::array::from_fn(|_| MaybeUninit::uninit());
         let n = {
             let mut guard = self.0.lock();
             if guard.is_empty() {
                 return 0;
             }
-            guard.take_all(&mut buf)
+            guard.take_where(&mut buf, filter)
         };
         for entry in &mut buf[..n] {
-            let waker = unsafe { core::mem::replace(entry, MaybeUninit::uninit()).assume_init() };
-            waker.wake();
+            let entry = unsafe { core::mem::replace(entry, MaybeUninit::uninit()).assume_init() };
+            entry.waker.wake();
         }
         n
     }
@@ -165,17 +205,17 @@ impl PollSet {
 
 impl Drop for PollSet {
     fn drop(&mut self) {
-        // Ensure all entries are dropped
-        self.wake();
+        // Ensure all entries are dropped (wake everyone, regardless of events).
+        self.drain(|_| true);
     }
 }
 
 impl Wake for PollSet {
     fn wake(self: Arc<Self>) {
-        self.as_ref().wake();
+        self.as_ref().drain(|_| true);
     }
 
     fn wake_by_ref(self: &Arc<Self>) {
-        self.as_ref().wake();
+        self.as_ref().drain(|_| true);
     }
 }
