@@ -31,3 +31,8 @@ tokio = { version = "1.37", features = [
     "sync",
 ] }
 futures = "0.3"
+criterion = "0.5"
+
+[[bench]]
+name = "bench"
+harness = false

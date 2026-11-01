@@ -108,6 +108,100 @@ fn register_merges_events() {
 }
 
 #[test]
+fn same_waker_not_duplicated() {
+    let ps = PollSet::new();
+    let counter = Counter::new();
+    let waker = Waker::from(counter.clone());
+    for _ in 0..65 {
+        ps.register(&waker);
+    }
+    // Deduplicated into a single entry, so it is woken exactly once.
+    assert_eq!(ps.wake(), 1);
+    assert_eq!(counter.count(), 1);
+}
+
+#[test]
+fn many_distinct_wakers() {
+    let ps = PollSet::new();
+    let counters = (0..200).map(|_| Counter::new()).collect::<Vec<_>>();
+    for c in &counters {
+        let waker = Waker::from(c.clone());
+        ps.register(&waker);
+    }
+    assert_eq!(ps.wake(), 64);
+    let total: usize = counters.iter().map(|c| c.count()).sum();
+    assert_eq!(total, 200);
+}
+
+#[test]
+fn pollset_as_waker() {
+    let ps = Arc::new(PollSet::new());
+    let counter = Counter::new();
+    let task_waker = Waker::from(counter.clone());
+    ps.register(&task_waker);
+
+    let ps_waker = Waker::from(ps.clone());
+    ps_waker.wake();
+
+    assert_eq!(counter.count(), 1);
+}
+
+#[test]
+fn io_events_flags() {
+    assert_eq!(
+        IoEvents::ALWAYS_POLL.bits(),
+        (IoEvents::ERR | IoEvents::HUP).bits()
+    );
+    let events = IoEvents::IN | IoEvents::OUT;
+    assert!(events.contains(IoEvents::IN));
+    assert!(events.contains(IoEvents::OUT));
+    assert!(!events.contains(IoEvents::ERR));
+    assert!(IoEvents::ALWAYS_POLL.contains(IoEvents::ERR));
+}
+
+#[test]
+fn partial_fill() {
+    let ps = PollSet::new();
+    let counters = (0..3).map(|_| Counter::new()).collect::<Vec<_>>();
+    for c in &counters {
+        let waker = Waker::from(c.clone());
+        ps.register(&waker);
+    }
+    assert_eq!(ps.wake(), 3);
+    for c in &counters {
+        assert_eq!(c.count(), 1);
+    }
+}
+
+#[test]
+fn concurrent_register_and_wake() {
+    let ps = Arc::new(PollSet::new());
+    let mut register_handles = Vec::new();
+    for _ in 0..8 {
+        let ps = ps.clone();
+        register_handles.push(std::thread::spawn(move || {
+            let counter = Counter::new();
+            let waker = Waker::from(counter);
+            for _ in 0..1000 {
+                ps.register(&waker);
+            }
+        }));
+    }
+
+    let ps = ps.clone();
+    let wake_handle = std::thread::spawn(move || {
+        for _ in 0..1000 {
+            let _ = PollSet::wake(&ps);
+        }
+    });
+
+    for h in register_handles {
+        h.join().unwrap();
+    }
+    wake_handle.join().unwrap();
+}
+
+#[test]
 fn wake_events_filters_by_events() {
     let ps = PollSet::new();
     let read = Counter::new();
